@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PubMed Central Review Downloader
----------------------------------
+PubMed Downloader
+-----------------
 1. Searches PubMed for a given term
-2. Filters for Review / Systematic Review publication types
+2. Optionally filters for Review / Systematic Review / Meta-Analysis types (--reviews-only)
 3. Filters by minimum citation count (via iCite)
 4. Downloads full-text PDFs for open-access articles via PMC OA Web Service
 5. Saves a TSV summary of all results
@@ -320,7 +320,7 @@ def fetch_article_details(pmids: list[str], email: str, api_key: str) -> list[di
 
 def filter_reviews(articles: list[dict]) -> list[dict]:
     reviews = [a for a in articles if a["pub_types"] & REVIEW_TYPES]
-    print(f"\n  Filtered to {len(reviews)} reviews / systematic reviews / meta-analyses.")
+    print(f"  Filtered to {len(reviews)} reviews / systematic reviews / meta-analyses.")
     return reviews
 
 
@@ -503,6 +503,7 @@ def main():
     parser.add_argument("--api-key",       default="2e107b339d3ce35ba53f430c0863f9245808", help="NCBI API key (optional; raises rate limit from 3 to 10 req/s)")
     parser.add_argument("--field",         default="all", choices=["all", "title", "tiab"],
                                            help="Restrict query to: all fields (default), title only, or title+abstract")
+    parser.add_argument("--reviews-only",  action="store_true",   help="Keep only Review, Systematic Review, and Meta-Analysis article types")
     parser.add_argument("--no-download",   action="store_true",   help="Skip PDF download; only produce the summary TSV")
     parser.add_argument("--oa-comm-only",  action="store_true",   help="Only download PDFs with a commercial-friendly OA license (CC BY, CC BY-SA, CC BY-ND)")
     args = parser.parse_args()
@@ -522,16 +523,18 @@ def main():
 
     # 2. Fetch details + filter reviews
     articles = fetch_article_details(pmids, args.email, args.api_key)
-    reviews = filter_reviews(articles)
-    if not reviews:
-        print("No reviews found. Try a broader query.")
-        sys.exit(0)
+    if args.reviews_only:
+        print("\n[2b] Filtering for reviews / systematic reviews / meta-analyses...")
+        articles = filter_reviews(articles)
+        if not articles:
+            print("No reviews found. Try a broader query or remove --reviews-only.")
+            sys.exit(0)
 
     # 3. Citation counts + filter
-    add_citation_counts(reviews)
-    filtered = filter_by_citations(reviews, args.min_citations)
+    add_citation_counts(articles)
+    filtered = filter_by_citations(articles, args.min_citations)
     if not filtered:
-        print(f"No reviews with ≥ {args.min_citations} citations. Try lowering --min-citations.")
+        print(f"No articles with ≥ {args.min_citations} citations. Try lowering --min-citations.")
         sys.exit(0)
 
     # 4. Download PDFs
@@ -545,7 +548,7 @@ def main():
     # 5. Summary
     save_summary(filtered, output_dir)
 
-    print(f"\nDone. {len(filtered)} reviews meet your criteria.")
+    print(f"\nDone. {len(filtered)} articles meet your criteria.")
     if not args.no_download:
         downloaded = sum(1 for a in filtered if a["downloaded"])
         print(f"  {downloaded} PDFs downloaded (rest are not open access).")
