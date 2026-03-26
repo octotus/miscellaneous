@@ -421,23 +421,31 @@ def download_pdfs(articles: list[dict], output_dir: Path, oa_comm_only: bool = F
     print(f"\n[4] Downloading full-text PDFs{flag} to '{output_dir}'...")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    oa_count = 0
+    total = len(articles)
+    no_pmc = 0
+    not_oa = 0
+    non_comm = 0
+    failed = 0
+    already = 0
+    downloaded = 0
+
     for i, a in enumerate(articles):
-        label = f"  [{i+1}/{len(articles)}] PMID {a['pmid']}"
+        print(f"  Checking {i+1}/{total}...", end="\r")
+
         if not a["pmc_id"]:
-            print(f"{label} — no PMC ID, skipping.")
+            no_pmc += 1
             continue
 
         pdf_url, license_str = get_oa_info(a["pmc_id"])
         a["oa_license"] = license_str
 
         if not pdf_url:
-            print(f"{label} — not open access, skipping.")
+            not_oa += 1
             time.sleep(0.2)
             continue
 
         if oa_comm_only and not is_commercial_license(license_str):
-            print(f"{label} — license '{license_str or 'unknown'}' is non-commercial, skipping.")
+            non_comm += 1
             time.sleep(0.2)
             continue
 
@@ -446,9 +454,8 @@ def download_pdfs(articles: list[dict], output_dir: Path, oa_comm_only: bool = F
         filename = output_dir / f"PMC{a['pmc_id']}_{safe_title}.pdf"
 
         if filename.exists():
-            print(f"{label} — already downloaded.")
+            already += 1
             a["downloaded"] = True
-            oa_count += 1
             continue
 
         try:
@@ -457,15 +464,25 @@ def download_pdfs(articles: list[dict], output_dir: Path, oa_comm_only: bool = F
             with open(filename, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-            print(f"{label} — [{license_str or 'OA'}] saved '{filename.name}'")
+            title_short = a["title"][:80] + ("…" if len(a["title"]) > 80 else "")
+            print(f"  [{downloaded + already + 1}] PMID {a['pmid']} — {title_short}")
             a["downloaded"] = True
-            oa_count += 1
+            downloaded += 1
         except Exception as e:
-            print(f"{label} — download failed: {e}")
+            failed += 1
+            print(f"  PMID {a['pmid']} — download failed: {e}")
 
         time.sleep(0.5)
 
-    print(f"\n  Downloaded {oa_count} / {len(articles)} PDFs.")
+    print(f"""
+  ── Download summary ──────────────────────────
+  Checked      : {total}
+  No PMC ID    : {no_pmc}
+  Not OA       : {not_oa}{"" if not oa_comm_only else f"  Non-commercial: {non_comm}"}
+  Failed       : {failed}
+  Already had  : {already}
+  Downloaded   : {downloaded}
+  ──────────────────────────────────────────────""")
 
 
 # ── Step 5: Save summary TSV ──────────────────────────────────────────────────
