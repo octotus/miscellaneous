@@ -25,6 +25,7 @@ Requirements:
 import argparse
 import json
 import os
+import re
 import sys
 import tarfile
 import tempfile
@@ -57,6 +58,15 @@ def ncbi_get(endpoint: str, params: dict, retries: int = 3) -> requests.Response
                 raise
             print(f"  Retry {attempt + 1}/{retries} after error: {e}")
             time.sleep(2 ** attempt)
+
+
+def safe_parse_xml(text: str) -> ET.Element:
+    """Parse XML, falling back to escaping bare & if the first attempt fails."""
+    try:
+        return ET.fromstring(text)
+    except ET.ParseError:
+        cleaned = re.sub(r'&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)', '&amp;', text)
+        return ET.fromstring(cleaned)
 
 
 def chunked(lst: list, n: int):
@@ -251,7 +261,7 @@ def fetch_article_details(pmids: list[str], email: str, api_key: str) -> list[di
             params["api_key"] = api_key
 
         r = ncbi_get(f"{EUTILS}/efetch.fcgi", params)
-        root = ET.fromstring(r.text)
+        root = safe_parse_xml(r.text)
 
         for article_elem in root.findall(".//PubmedArticle"):
             pmid_elem = article_elem.find(".//PMID")
@@ -446,7 +456,7 @@ def get_oa_info(pmc_id: str) -> tuple[dict[str, str], str]:
     if not r.ok:
         return empty, ""
     try:
-        root = ET.fromstring(r.text)
+        root = safe_parse_xml(r.text)
         if root.find(".//error") is not None:
             return empty, ""
         record = root.find(".//record")
