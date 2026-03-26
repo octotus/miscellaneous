@@ -317,11 +317,12 @@ def fetch_article_details(pmids: list[str], email: str, api_key: str) -> list[di
                     doi = id_elem.text or ""
                     break
 
-            # PMC ID
+            # PMC ID — strip leading "PMC" prefix if present so get_oa_info
+            # can consistently prepend it without double-prefixing
             pmc_id = ""
             for id_elem in article_elem.findall(".//ArticleId"):
                 if id_elem.get("IdType") == "pmc":
-                    pmc_id = id_elem.text or ""
+                    pmc_id = re.sub(r'^PMC', '', (id_elem.text or "").strip(), flags=re.IGNORECASE)
                     break
 
             articles.append({
