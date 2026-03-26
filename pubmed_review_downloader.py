@@ -76,22 +76,93 @@ def parse_date(date_str: str, label: str) -> str:
 
 PUBMED_MAX_PER_QUERY = 9999   # Hard NCBI limit for a single esearch call
 
+DAYS_IN_MONTH = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
-def _esearch_year(base_params: dict, year: int, want: int) -> list[str]:
-    """Fetch up to `want` PMIDs for a single calendar year."""
+
+def _esearch_window(base_params: dict, mindate: str, maxdate: str, want: int) -> tuple[list[str], int]:
+    """
+    Fetch up to `want` PMIDs for a date window.
+    Returns (pmid_list, total_count).
+    """
     params = {
         **base_params,
         "datetype": "pdat",
-        "mindate": f"{year}/01/01",
-        "maxdate": f"{year}/12/31",
+        "mindate": mindate,
+        "maxdate": maxdate,
         "retmax": min(want, PUBMED_MAX_PER_QUERY),
     }
     r = ncbi_get(f"{EUTILS}/esearch.fcgi", params)
     esearch = json.loads(r.text, strict=False).get("esearchresult", {})
     if "ERROR" in esearch or "error" in esearch:
-        print(f"\n  NCBI error ({year}): {esearch.get('ERROR') or esearch.get('error')}")
-        return []
-    return esearch.get("idlist", [])
+        print(f"\n  NCBI error ({mindate}–{maxdate}): {esearch.get('ERROR') or esearch.get('error')}")
+        return [], 0
+    total = int(esearch.get("count", 0))
+    return esearch.get("idlist", []), total
+
+
+def _esearch_year(base_params: dict, year: int, want: int) -> list[str]:
+    """
+    Fetch up to `want` PMIDs for a single year.
+    Automatically falls back to month-level sweep if the year exceeds
+    PUBMED_MAX_PER_QUERY results. Within each month, falls back to a
+    day-level sweep if the month itself exceeds the limit.
+    """
+    mindate = f"{year}/01/01"
+    maxdate = f"{year}/12/31"
+
+    # Check yearly count first (retmax=0 is fast)
+    _, yearly_total = _esearch_window(base_params, mindate, maxdate, 0)
+    time.sleep(0.11)
+
+    if yearly_total <= PUBMED_MAX_PER_QUERY:
+        pmids, _ = _esearch_window(base_params, mindate, maxdate, want)
+        return pmids
+
+    # Month-level sweep
+    print(f"\n  {year}: {yearly_total} results — sweeping by month...")
+    seen: set[str] = set()
+    pmids: list[str] = []
+    leap = (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0))
+    days = DAYS_IN_MONTH[:]
+    if leap:
+        days[2] = 29
+
+    for month in range(12, 0, -1):   # December → January
+        if len(pmids) >= want:
+            break
+        mm = f"{month:02d}"
+        last_day = days[month]
+        mo_min = f"{year}/{mm}/01"
+        mo_max = f"{year}/{mm}/{last_day}"
+
+        _, mo_total = _esearch_window(base_params, mo_min, mo_max, 0)
+        time.sleep(0.11)
+
+        if mo_total == 0:
+            continue
+
+        if mo_total <= PUBMED_MAX_PER_QUERY:
+            batch, _ = _esearch_window(base_params, mo_min, mo_max, want - len(pmids))
+            time.sleep(0.11)
+            new = [p for p in batch if p not in seen]
+            seen.update(new)
+            pmids.extend(new)
+            print(f"    {year}/{mm}: +{len(new)} ({mo_total} total)  [{len(pmids)}/{want}]", end="\r")
+        else:
+            # Day-level sweep for busy months
+            print(f"\n    {year}/{mm}: {mo_total} results — sweeping by day...")
+            for day in range(last_day, 0, -1):
+                if len(pmids) >= want:
+                    break
+                dd = f"{day:02d}"
+                date_str = f"{year}/{mm}/{dd}"
+                batch, _ = _esearch_window(base_params, date_str, date_str, want - len(pmids))
+                time.sleep(0.11)
+                new = [p for p in batch if p not in seen]
+                seen.update(new)
+                pmids.extend(new)
+
+    return pmids
 
 
 def search_pubmed(query: str, max_results: int, email: str, api_key: str,
