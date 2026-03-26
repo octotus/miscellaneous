@@ -463,25 +463,31 @@ def cmd_index(args) -> None:
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Index and search PMC full-text packages.")
-    parser.add_argument("--db",          default=None,                  help="SQLite database path (default: <input-dir-name>.db)")
-    parser.add_argument("--ollama-url",  default="http://localhost:11434",
-                        help="Ollama base URL (default: http://localhost:11434). "
-                             "On WSL2 with Ollama on Windows, use http://<windows-ip>:11434")
-    parser.add_argument("--embed-model", default="nomic-embed-text",     help="Ollama embedding model")
+    _ollama_args = dict(
+        flags=["--ollama-url"],
+        kwargs=dict(default="http://localhost:11434",
+                    help="Ollama base URL (default: http://localhost:11434). "
+                         "On WSL2 with Ollama on Windows, use http://<windows-ip>:11434"),
+    )
+    _shared = argparse.ArgumentParser(add_help=False)
+    _shared.add_argument("--db",          default=None,               help="SQLite database path (default: <input-dir-name>.db for index, required for search)")
+    _shared.add_argument("--ollama-url",  **_ollama_args["kwargs"])
+    _shared.add_argument("--embed-model", default="nomic-embed-text", help="Ollama embedding model")
 
+    parser = argparse.ArgumentParser(description="Index and search PMC full-text packages.",
+                                     parents=[_shared])
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    pi = sub.add_parser("index", help="Index a directory of extracted PMC packages")
-    pi.add_argument("--input-dir",     required=True,      help="Folder containing PMC{id}/ subdirectories")
-    pi.add_argument("--vision-model",  default="llava",    help="Ollama vision model for figure interpretation (default: llava)")
+    pi = sub.add_parser("index", parents=[_shared], help="Index a directory of extracted PMC packages")
+    pi.add_argument("--input-dir",     required=True,         help="Folder containing PMC{id}/ subdirectories")
+    pi.add_argument("--vision-model",  default="llava",       help="Ollama vision model for figure interpretation (default: llava)")
     pi.add_argument("--chunk-size",    type=int, default=400, help="Max words per chunk (default: 400)")
     pi.add_argument("--chunk-overlap", type=int, default=50,  help="Word overlap between chunks (default: 50)")
     pi.add_argument("--skip-vision",   action="store_true",   help="Skip figure interpretation")
     pi.add_argument("--reindex",       action="store_true",   help="Reprocess already-indexed papers")
 
-    ps = sub.add_parser("search", help="Search the index")
-    ps.add_argument("--query",  required=True,     help="Search query")
+    ps = sub.add_parser("search", parents=[_shared], help="Search the index")
+    ps.add_argument("--query",  required=True,        help="Search query")
     ps.add_argument("--top-k",  type=int, default=10, help="Number of results (default: 10)")
     ps.set_defaults(db_required=True)
 
