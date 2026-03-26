@@ -165,16 +165,23 @@ def _esearch_year(base_params: dict, year: int, want: int) -> list[str]:
     return pmids
 
 
+FIELD_TAGS = {"all": "", "title": "[ti]", "tiab": "[tiab]"}
+
+
 def search_pubmed(query: str, max_results: int, email: str, api_key: str,
-                  from_date: str = "", to_date: str = "") -> list[str]:
+                  from_date: str = "", to_date: str = "",
+                  field: str = "all") -> list[str]:
+    tag = FIELD_TAGS.get(field, "")
+    term = f"{query}{tag}" if tag else query
     date_info = ""
     if from_date or to_date:
         date_info = f" [{from_date or 'any'} → {to_date or 'any'}]"
-    print(f"\n[1] Searching PubMed: '{query}' (max {max_results}){date_info}...")
+    field_info = f" (field: {field})" if field != "all" else ""
+    print(f"\n[1] Searching PubMed: '{term}' (max {max_results}){date_info}{field_info}...")
 
     base_params = {
         "db": "pubmed",
-        "term": query,
+        "term": term,
         "retmode": "json",
         "email": email,
     }
@@ -494,6 +501,8 @@ def main():
     parser.add_argument("--output-dir",    default="./reviews",   help="Folder to save PDFs and summary (default: ./reviews)")
     parser.add_argument("--email",         required=True,  help="Your email (required by NCBI)")
     parser.add_argument("--api-key",       default="2e107b339d3ce35ba53f430c0863f9245808", help="NCBI API key (optional; raises rate limit from 3 to 10 req/s)")
+    parser.add_argument("--field",         default="all", choices=["all", "title", "tiab"],
+                                           help="Restrict query to: all fields (default), title only, or title+abstract")
     parser.add_argument("--no-download",   action="store_true",   help="Skip PDF download; only produce the summary TSV")
     parser.add_argument("--oa-comm-only",  action="store_true",   help="Only download PDFs with a commercial-friendly OA license (CC BY, CC BY-SA, CC BY-ND)")
     args = parser.parse_args()
@@ -506,7 +515,7 @@ def main():
 
     # 1. Search
     pmids = search_pubmed(args.query, args.max_results, args.email, args.api_key,
-                          from_date=from_date, to_date=to_date)
+                          from_date=from_date, to_date=to_date, field=args.field)
     if not pmids:
         print("No results. Exiting.")
         sys.exit(0)
