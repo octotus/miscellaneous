@@ -409,7 +409,7 @@ def resolve_pmc_ids(articles: list[dict], email: str) -> None:
         if not r.ok:
             continue
         data = json.loads(r.text, strict=False)
-        id_map = {rec.get("pmid", ""): rec.get("pmcid", "") for rec in data.get("records", [])}
+        id_map = {str(rec.get("pmid", "")): rec.get("pmcid", "") for rec in data.get("records", [])}
         for a in batch:
             a["pmc_id"] = id_map.get(a["pmid"], "").replace("PMC", "")
         time.sleep(0.3)
