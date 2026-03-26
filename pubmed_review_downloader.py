@@ -385,7 +385,7 @@ def pmcids_to_pmids(pmcids: list[str], email: str, api_key: str) -> list[str]:
             print(f"  Warning: ID converter returned {r.status_code} for a batch, skipping.")
             continue
         for rec in json.loads(r.text, strict=False).get("records", []):
-            pmid = rec.get("pmid", "")
+            pmid = str(rec.get("pmid", ""))
             if pmid:
                 pmids.append(pmid)
         time.sleep(0.3)
