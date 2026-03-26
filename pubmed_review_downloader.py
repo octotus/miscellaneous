@@ -556,10 +556,8 @@ def download_articles(articles: list[dict], output_dir: Path,
                     for chunk in r.iter_content(chunk_size=8192):
                         tmp.write(chunk)
                     tmp_path = tmp.name
-                dest_dir = output_dir / pmc_tag
-                dest_dir.mkdir(exist_ok=True)
                 with tarfile.open(tmp_path, "r:gz") as tar:
-                    tar.extractall(path=dest_dir)
+                    tar.extractall(path=output_dir)
                 os.unlink(tmp_path)
             else:
                 ext = "xml" if fmt == "xml" else "pdf"

@@ -404,19 +404,31 @@ def cmd_index(args) -> None:
     input_dir  = Path(args.input_dir)
     if args.db is None:
         args.db = str(input_dir.resolve().name) + ".db"
-    paper_dirs = sorted(d for d in input_dir.rglob("PMC*")
-                        if d.is_dir() and re.match(r'^PMC\d+$', d.name, re.IGNORECASE))
-    if not paper_dirs:
+    # Find all PMC{id}/ dirs at any depth; deduplicate by pmc_id keeping the
+    # one that actually contains an XML/NXML file (handles old nested extractions).
+    def find_xml(d: Path):
+        return [f for f in d.iterdir() if f.is_file() and f.suffix in ('.xml', '.nxml')]
+
+    seen: dict[str, tuple[Path, list]] = {}
+    for d in input_dir.rglob("PMC*"):
+        if not (d.is_dir() and re.match(r'^PMC\d+$', d.name, re.IGNORECASE)):
+            continue
+        pmc_id = re.sub(r'^PMC', '', d.name, flags=re.IGNORECASE)
+        xmls = find_xml(d)
+        if pmc_id not in seen or (xmls and not seen[pmc_id][1]):
+            seen[pmc_id] = (d, xmls)
+
+    paper_entries = sorted(seen.items())   # [(pmc_id, (paper_dir, xml_files))]
+    if not paper_entries:
         print(f"No PMC{{id}} subdirectories found under '{input_dir}'.")
         sys.exit(1)
 
     con = open_db(args.db)
     indexed_ids = {r[0] for r in con.execute("SELECT id FROM papers").fetchall()}
 
-    total, done, skipped, failed = len(paper_dirs), 0, 0, 0
+    total, done, skipped, failed = len(paper_entries), 0, 0, 0
 
-    for i, paper_dir in enumerate(paper_dirs, 1):
-        pmc_id = re.sub(r'^PMC', '', paper_dir.name, flags=re.IGNORECASE)
+    for i, (pmc_id, (paper_dir, xml_files)) in enumerate(paper_entries, 1):
         print(f"  [{i}/{total}] PMC{pmc_id}", end="  ", flush=True)
 
         if pmc_id in indexed_ids and not args.reindex:
@@ -424,7 +436,6 @@ def cmd_index(args) -> None:
             skipped += 1
             continue
 
-        xml_files = list(paper_dir.glob("*.xml"))
         if not xml_files:
             print("no XML found, skipping.")
             failed += 1
