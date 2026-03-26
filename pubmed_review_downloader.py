@@ -79,27 +79,48 @@ def search_pubmed(query: str, max_results: int, email: str, api_key: str,
     if from_date or to_date:
         date_info = f" [{from_date or 'any'} → {to_date or 'any'}]"
     print(f"\n[1] Searching PubMed: '{query}' (max {max_results}){date_info}...")
-    params = {
+
+    base_params = {
         "db": "pubmed",
         "term": query,
-        "retmax": max_results,
         "retmode": "json",
         "email": email,
     }
     if from_date or to_date:
-        params["datetype"] = "pdat"
+        base_params["datetype"] = "pdat"
         if from_date:
-            params["mindate"] = from_date
+            base_params["mindate"] = from_date
         if to_date:
-            params["maxdate"] = to_date
+            base_params["maxdate"] = to_date
     if api_key:
-        params["api_key"] = api_key
+        base_params["api_key"] = api_key
 
-    r = ncbi_get(f"{EUTILS}/esearch.fcgi", params)
-    data = r.json()
-    pmids = data["esearchresult"]["idlist"]
-    total = int(data["esearchresult"]["count"])
-    print(f"  Found {total} total results; retrieved {len(pmids)} PMIDs.")
+    # First call: get total count
+    r = ncbi_get(f"{EUTILS}/esearch.fcgi", {**base_params, "retmax": 0})
+    total = int(r.json()["esearchresult"]["count"])
+    to_fetch = min(max_results, total)
+    print(f"  Found {total} total results; will retrieve {to_fetch} PMIDs.")
+
+    # Paginate in chunks of 10,000 (NCBI hard limit per request)
+    PAGE = 10_000
+    pmids: list[str] = []
+    retstart = 0
+    while len(pmids) < to_fetch:
+        batch_size = min(PAGE, to_fetch - len(pmids))
+        r = ncbi_get(f"{EUTILS}/esearch.fcgi", {
+            **base_params,
+            "retmax": batch_size,
+            "retstart": retstart,
+        })
+        batch = r.json()["esearchresult"]["idlist"]
+        if not batch:
+            break
+        pmids.extend(batch)
+        retstart += len(batch)
+        print(f"  Retrieved {len(pmids)} / {to_fetch} PMIDs...", end="\r")
+        time.sleep(0.11)  # stay within rate limit
+
+    print(f"  Retrieved {len(pmids)} PMIDs.{' ' * 20}")
     return pmids
 
 
