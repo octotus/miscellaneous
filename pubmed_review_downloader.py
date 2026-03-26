@@ -352,6 +352,42 @@ def filter_by_citations(articles: list[dict], min_citations: int) -> list[dict]:
 
 # ── Step 4: Resolve PMC IDs and download full text ────────────────────────────
 
+def load_pmcids_from_file(path: str) -> list[str]:
+    """Read a plain-text file of PMCIDs (one per line or comma/space separated).
+    Strips any leading 'PMC' prefix and blank lines."""
+    with open(path, encoding="utf-8") as f:
+        raw = f.read()
+    tokens = [t.strip() for t in raw.replace(",", " ").split()]
+    pmcids = []
+    for t in tokens:
+        t = t.upper().removeprefix("PMC")
+        if t.isdigit():
+            pmcids.append(t)
+    return pmcids
+
+
+def pmcids_to_pmids(pmcids: list[str], email: str, api_key: str) -> list[str]:
+    """Convert a list of numeric PMCIDs to PMIDs via NCBI ID converter."""
+    print(f"\n[1] Converting {len(pmcids)} PMCIDs to PMIDs...")
+    pmids: list[str] = []
+    for batch in chunked(pmcids, 50):
+        ids = ",".join(f"PMC{p}" for p in batch)
+        params = {"ids": ids, "format": "json", "email": email}
+        if api_key:
+            params["tool"] = "pubmed_downloader"
+        r = requests.get(IDCONV, params=params, timeout=30)
+        if not r.ok:
+            print(f"  Warning: ID converter returned {r.status_code} for a batch, skipping.")
+            continue
+        for rec in json.loads(r.text, strict=False).get("records", []):
+            pmid = rec.get("pmid", "")
+            if pmid:
+                pmids.append(pmid)
+        time.sleep(0.3)
+    print(f"  Resolved {len(pmids)} / {len(pmcids)} PMIDs.")
+    return pmids
+
+
 def resolve_pmc_ids(articles: list[dict], email: str) -> None:
     """Fill in missing pmc_id using NCBI ID converter."""
     missing = [a for a in articles if not a["pmc_id"] and a["pmid"]]
@@ -510,8 +546,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Search PubMed for reviews, filter by citations, download PDFs."
     )
-    parser.add_argument("--query",         required=True,  help='Search term, e.g. "tuberculosis drug resistance"')
-    parser.add_argument("--max-results",   type=int, default=500, help="Max PubMed records to retrieve (default: 500)")
+    parser.add_argument("--query",         default="",     help='Search term, e.g. "tuberculosis drug resistance"')
+    parser.add_argument("--pmcid-file",    default="",     help="Plain-text file of PMCIDs to use instead of searching (one per line or comma-separated)")
+    parser.add_argument("--max-results",   type=int, default=500, help="Max PubMed records to retrieve when searching (default: 500)")
     parser.add_argument("--min-citations", type=int, default=10,  help="Minimum citation count to include (default: 10)")
     parser.add_argument("--from-date",     default="",     help="Earliest publication date, DD-MM-YYYY (optional)")
     parser.add_argument("--to-date",       default="",     help="Latest publication date, DD-MM-YYYY (optional)")
@@ -525,15 +562,24 @@ def main():
     parser.add_argument("--oa-comm-only",  action="store_true",   help="Only download PDFs with a commercial-friendly OA license (CC BY, CC BY-SA, CC BY-ND)")
     args = parser.parse_args()
 
+    if not args.query and not args.pmcid_file:
+        parser.error("Provide either --query or --pmcid-file.")
+
     output_dir = Path(args.output_dir)
 
-    # Parse and validate dates
-    from_date = parse_date(args.from_date, "from-date") if args.from_date else ""
-    to_date   = parse_date(args.to_date,   "to-date")   if args.to_date   else ""
+    # 1. Search or load PMCIDs
+    if args.pmcid_file:
+        pmcids = load_pmcids_from_file(args.pmcid_file)
+        if not pmcids:
+            print("No valid PMCIDs found in file. Exiting.")
+            sys.exit(0)
+        pmids = pmcids_to_pmids(pmcids, args.email, args.api_key)
+    else:
+        from_date = parse_date(args.from_date, "from-date") if args.from_date else ""
+        to_date   = parse_date(args.to_date,   "to-date")   if args.to_date   else ""
+        pmids = search_pubmed(args.query, args.max_results, args.email, args.api_key,
+                              from_date=from_date, to_date=to_date, field=args.field)
 
-    # 1. Search
-    pmids = search_pubmed(args.query, args.max_results, args.email, args.api_key,
-                          from_date=from_date, to_date=to_date, field=args.field)
     if not pmids:
         print("No results. Exiting.")
         sys.exit(0)
