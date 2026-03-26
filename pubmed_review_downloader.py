@@ -26,6 +26,8 @@ import argparse
 import json
 import os
 import sys
+import tarfile
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -314,6 +316,8 @@ def fetch_article_details(pmids: list[str], email: str, api_key: str) -> list[di
                 "citations": 0,          # filled in Step 3
                 "oa_license": "",        # filled in Step 4
                 "oa_pdf_url": "",        # filled in Step 4
+                "oa_xml_url": "",        # filled in Step 4
+                "oa_tgz_url": "",        # filled in Step 4
                 "downloaded": False,
             })
 
@@ -428,43 +432,51 @@ def is_commercial_license(license: str) -> bool:
     return "CC" in lic and "NC" not in lic
 
 
-def get_oa_info(pmc_id: str) -> tuple[str, str]:
+def get_oa_info(pmc_id: str) -> tuple[dict[str, str], str]:
     """
     Query PMC OA Web Service.
-    Returns (pdf_url, license_string). Both empty if not open access.
+    Returns (urls, license_string) where urls is a dict with keys
+    'pdf', 'xml', 'tgz' (each empty string if not available).
+    Both empty if not open access.
     """
+    empty: dict[str, str] = {"pdf": "", "xml": "", "tgz": ""}
     if not pmc_id:
-        return "", ""
+        return empty, ""
     r = requests.get(PMC_OA, params={"id": f"PMC{pmc_id}"}, timeout=20)
     if not r.ok:
-        return "", ""
+        return empty, ""
     try:
         root = ET.fromstring(r.text)
         if root.find(".//error") is not None:
-            return "", ""
+            return empty, ""
         record = root.find(".//record")
         if record is None:
-            return "", ""
+            return empty, ""
         license_str = record.get("license", "")
-        link = record.find(".//link[@format='pdf']")
-        if link is None:
-            return "", license_str
-        href = link.get("href", "")
-        if href.startswith("ftp://"):
-            href = href.replace("ftp://", "https://", 1)
-        return href, license_str
+        urls: dict[str, str] = {"pdf": "", "xml": "", "tgz": ""}
+        for fmt in ("pdf", "xml", "tgz"):
+            link = record.find(f".//link[@format='{fmt}']")
+            if link is not None:
+                href = link.get("href", "")
+                if href.startswith("ftp://"):
+                    href = href.replace("ftp://", "https://", 1)
+                urls[fmt] = href
+        return urls, license_str
     except ET.ParseError:
-        return "", ""
+        return empty, ""
 
 
-def download_pdfs(articles: list[dict], output_dir: Path, oa_comm_only: bool = False) -> None:
-    flag = " (commercial licenses only)" if oa_comm_only else ""
-    print(f"\n[4] Downloading full-text PDFs{flag} to '{output_dir}'...")
+def download_articles(articles: list[dict], output_dir: Path,
+                      fmt: str = "pdf", oa_comm_only: bool = False) -> None:
+    fmt_label = {"pdf": "PDFs", "xml": "XML files", "tgz": "full packages (XML + figures)"}[fmt]
+    comm_flag = " (commercial licenses only)" if oa_comm_only else ""
+    print(f"\n[4] Downloading {fmt_label}{comm_flag} to '{output_dir}'...")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     total = len(articles)
     no_pmc = 0
     not_oa = 0
+    not_avail = 0
     non_comm = 0
     failed = 0
     already = 0
@@ -477,10 +489,13 @@ def download_pdfs(articles: list[dict], output_dir: Path, oa_comm_only: bool = F
             no_pmc += 1
             continue
 
-        pdf_url, license_str = get_oa_info(a["pmc_id"])
+        urls, license_str = get_oa_info(a["pmc_id"])
         a["oa_license"] = license_str
+        a["oa_pdf_url"] = urls["pdf"]
+        a["oa_xml_url"] = urls["xml"]
+        a["oa_tgz_url"] = urls["tgz"]
 
-        if not pdf_url:
+        if not any(urls.values()):
             not_oa += 1
             time.sleep(0.2)
             continue
@@ -490,21 +505,48 @@ def download_pdfs(articles: list[dict], output_dir: Path, oa_comm_only: bool = F
             time.sleep(0.2)
             continue
 
-        a["oa_pdf_url"] = pdf_url
-        safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in a["title"])[:60]
-        filename = output_dir / f"PMC{a['pmc_id']}_{safe_title}.pdf"
+        url = urls[fmt]
+        if not url:
+            not_avail += 1
+            continue
 
-        if filename.exists():
+        pmc_tag = f"PMC{a['pmc_id']}"
+
+        # Already-downloaded check
+        if fmt == "tgz":
+            dest_dir = output_dir / pmc_tag
+            already_done = dest_dir.exists() and any(dest_dir.iterdir())
+        else:
+            ext = "xml" if fmt == "xml" else "pdf"
+            dest_file = output_dir / f"{pmc_tag}.{ext}"
+            already_done = dest_file.exists()
+
+        if already_done:
             already += 1
             a["downloaded"] = True
             continue
 
         try:
-            r = requests.get(pdf_url, timeout=60, stream=True)
+            r = requests.get(url, timeout=120, stream=True)
             r.raise_for_status()
-            with open(filename, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
+
+            if fmt == "tgz":
+                with tempfile.NamedTemporaryFile(suffix=".tgz", delete=False) as tmp:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        tmp.write(chunk)
+                    tmp_path = tmp.name
+                dest_dir = output_dir / pmc_tag
+                dest_dir.mkdir(exist_ok=True)
+                with tarfile.open(tmp_path, "r:gz") as tar:
+                    tar.extractall(path=dest_dir)
+                os.unlink(tmp_path)
+            else:
+                ext = "xml" if fmt == "xml" else "pdf"
+                dest_file = output_dir / f"{pmc_tag}.{ext}"
+                with open(dest_file, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
             title_short = a["title"][:80] + ("…" if len(a["title"]) > 80 else "")
             print(f"  [{downloaded + already + 1}] PMID {a['pmid']} — {title_short}")
             a["downloaded"] = True
@@ -515,11 +557,13 @@ def download_pdfs(articles: list[dict], output_dir: Path, oa_comm_only: bool = F
 
         time.sleep(0.5)
 
+    not_avail_line = f"\n  No {fmt} available: {not_avail}" if not_avail else ""
+    non_comm_line  = f"\n  Non-commercial  : {non_comm}"   if oa_comm_only else ""
     print(f"""
   ── Download summary ──────────────────────────
   Checked      : {total}
   No PMC ID    : {no_pmc}
-  Not OA       : {not_oa}{"" if not oa_comm_only else f"  Non-commercial: {non_comm}"}
+  Not OA       : {not_oa}{not_avail_line}{non_comm_line}
   Failed       : {failed}
   Already had  : {already}
   Downloaded   : {downloaded}
@@ -530,7 +574,7 @@ def download_pdfs(articles: list[dict], output_dir: Path, oa_comm_only: bool = F
 
 def save_summary(articles: list[dict], output_dir: Path) -> None:
     tsv_path = output_dir / "summary.tsv"
-    headers = ["PMID", "PMC_ID", "Year", "Citations", "OA_License", "Commercial", "Downloaded", "Title", "Authors", "Journal", "DOI", "OA_PDF_URL"]
+    headers = ["PMID", "PMC_ID", "Year", "Citations", "OA_License", "Commercial", "Downloaded", "Title", "Authors", "Journal", "DOI", "OA_PDF_URL", "OA_XML_URL", "OA_TGZ_URL"]
     with open(tsv_path, "w", encoding="utf-8") as f:
         f.write("\t".join(headers) + "\n")
         for a in sorted(articles, key=lambda x: -x["citations"]):
@@ -539,7 +583,8 @@ def save_summary(articles: list[dict], output_dir: Path) -> None:
                 a["pmid"], a["pmc_id"], a["year"], str(a["citations"]),
                 a["oa_license"], comm,
                 "yes" if a["downloaded"] else "no",
-                a["title"], a["authors"], a["journal"], a["doi"], a["oa_pdf_url"],
+                a["title"], a["authors"], a["journal"], a["doi"],
+                a["oa_pdf_url"], a["oa_xml_url"], a["oa_tgz_url"],
             ]
             f.write("\t".join(row) + "\n")
     print(f"\n  Summary saved → {tsv_path}")
@@ -565,8 +610,10 @@ def main():
     parser.add_argument("--field",         default="all", choices=["all", "title", "tiab"],
                                            help="Restrict query to: all fields (default), title only, or title+abstract")
     parser.add_argument("--reviews-only",  action="store_true",   help="Keep only Review, Systematic Review, and Meta-Analysis article types")
-    parser.add_argument("--no-download",   action="store_true",   help="Skip PDF download; only produce the summary TSV")
-    parser.add_argument("--oa-comm-only",  action="store_true",   help="Only download PDFs with a commercial-friendly OA license (CC BY, CC BY-SA, CC BY-ND)")
+    parser.add_argument("--format",        default="pdf", choices=["pdf", "xml", "tgz"],
+                                           help="Download format: pdf (default), xml (full-text XML), tgz (XML + figures + tables, extracted per article)")
+    parser.add_argument("--no-download",   action="store_true",   help="Skip download; only produce the summary TSV")
+    parser.add_argument("--oa-comm-only",  action="store_true",   help="Only download files with a commercial-friendly OA license (CC BY, CC BY-SA, CC BY-ND)")
     args = parser.parse_args()
 
     if not args.query and not args.pmcid_file:
@@ -616,7 +663,7 @@ def main():
     # 4. Download PDFs
     if not args.no_download:
         resolve_pmc_ids(filtered, args.email)
-        download_pdfs(filtered, output_dir, oa_comm_only=args.oa_comm_only)
+        download_articles(filtered, output_dir, fmt=args.format, oa_comm_only=args.oa_comm_only)
     else:
         print("\n[4] Skipping PDF download (--no-download).")
         output_dir.mkdir(parents=True, exist_ok=True)
