@@ -113,7 +113,12 @@ def search_pubmed(query: str, max_results: int, email: str, api_key: str,
             "retmax": batch_size,
             "retstart": retstart,
         })
-        batch = json.loads(r.text, strict=False)["esearchresult"]["idlist"]
+        data = json.loads(r.text, strict=False)
+        esearch = data.get("esearchresult", {})
+        if "ERROR" in esearch or "error" in esearch:
+            print(f"\n  NCBI error: {esearch.get('ERROR') or esearch.get('error')}")
+            break
+        batch = esearch.get("idlist", [])
         if not batch:
             break
         pmids.extend(batch)
