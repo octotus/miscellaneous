@@ -183,17 +183,27 @@ FIELD_TAGS = {
 }
 
 
+OA_FILTER = {
+    "pubmed": "free full text[sb]",
+    "pmc":    "open access[filter]",
+}
+
+
 def search_pubmed(query: str, max_results: int, email: str, api_key: str,
                   from_date: str = "", to_date: str = "",
-                  field: str = "all", db: str = "pubmed") -> list[str]:
+                  field: str = "all", db: str = "pubmed",
+                  oa_filter: bool = False) -> list[str]:
     tag = FIELD_TAGS.get(db, FIELD_TAGS["pubmed"]).get(field, "")
     term = f"{query}{tag}" if tag else query
+    if oa_filter:
+        term = f"({term}) AND {OA_FILTER[db]}"
     date_info = ""
     if from_date or to_date:
         date_info = f" [{from_date or 'any'} → {to_date or 'any'}]"
     field_info = f" (field: {field})" if field != "all" else ""
+    oa_info = " [OA only]" if oa_filter else ""
     db_label = "PubMed Central" if db == "pmc" else "PubMed"
-    print(f"\n[1] Searching {db_label}: '{term}' (max {max_results}){date_info}{field_info}...")
+    print(f"\n[1] Searching {db_label}: '{term}' (max {max_results}){date_info}{field_info}{oa_info}...")
 
     base_params = {
         "db": db,
@@ -619,6 +629,7 @@ def main():
                                            help="NCBI database to search: pubmed (default) or pmc (PubMed Central)")
     parser.add_argument("--field",         default="all", choices=["all", "title", "tiab"],
                                            help="Restrict query to: all fields (default), title only, or title+abstract")
+    parser.add_argument("--oa-filter",     action="store_true",   help="Restrict search to open-access articles only (free full text[sb] for PubMed, open access[filter] for PMC)")
     parser.add_argument("--reviews-only",  action="store_true",   help="Keep only Review, Systematic Review, and Meta-Analysis article types")
     parser.add_argument("--format",        default="pdf", choices=["pdf", "xml", "tgz"],
                                            help="Download format: pdf (default), xml (full-text XML), tgz (XML + figures + tables, extracted per article)")
@@ -643,7 +654,7 @@ def main():
         to_date   = parse_date(args.to_date,   "to-date")   if args.to_date   else ""
         ids = search_pubmed(args.query, args.max_results, args.email, args.api_key,
                             from_date=from_date, to_date=to_date, field=args.field,
-                            db=args.db)
+                            db=args.db, oa_filter=args.oa_filter)
         if args.db == "pmc":
             # esearch on pmc returns PMCIDs; convert to PMIDs for the rest of the pipeline
             pmids = pmcids_to_pmids(ids, args.email, args.api_key)
