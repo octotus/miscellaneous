@@ -165,13 +165,16 @@ def _esearch_year(base_params: dict, year: int, want: int) -> list[str]:
     return pmids
 
 
-FIELD_TAGS = {"all": "", "title": "[ti]", "tiab": "[tiab]"}
+FIELD_TAGS = {
+    "pubmed": {"all": "",      "title": "[ti]",    "tiab": "[tiab]"},
+    "pmc":    {"all": "",      "title": "[title]", "tiab": "[title/abstract]"},
+}
 
 
 def search_pubmed(query: str, max_results: int, email: str, api_key: str,
                   from_date: str = "", to_date: str = "",
                   field: str = "all", db: str = "pubmed") -> list[str]:
-    tag = FIELD_TAGS.get(field, "")
+    tag = FIELD_TAGS.get(db, FIELD_TAGS["pubmed"]).get(field, "")
     term = f"{query}{tag}" if tag else query
     date_info = ""
     if from_date or to_date:
