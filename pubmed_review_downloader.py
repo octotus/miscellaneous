@@ -13,6 +13,8 @@ Usage:
         --query "tuberculosis drug resistance" \
         --max-results 500 \
         --min-citations 20 \
+        --from-date 01-01-2015 \
+        --to-date 31-12-2023 \
         --output-dir ./reviews \
         --email your@email.com
 
@@ -25,6 +27,7 @@ import os
 import sys
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -60,8 +63,22 @@ def chunked(lst: list, n: int):
 
 # ── Step 1: Search ────────────────────────────────────────────────────────────
 
-def search_pubmed(query: str, max_results: int, email: str, api_key: str) -> list[str]:
-    print(f"\n[1] Searching PubMed: '{query}' (max {max_results})...")
+def parse_date(date_str: str, label: str) -> str:
+    """Parse DD-MM-YYYY and return YYYY/MM/DD for NCBI."""
+    try:
+        dt = datetime.strptime(date_str.strip(), "%d-%m-%Y")
+        return dt.strftime("%Y/%m/%d")
+    except ValueError:
+        print(f"Error: --{label} '{date_str}' is not a valid date. Use DD-MM-YYYY format.")
+        sys.exit(1)
+
+
+def search_pubmed(query: str, max_results: int, email: str, api_key: str,
+                  from_date: str = "", to_date: str = "") -> list[str]:
+    date_info = ""
+    if from_date or to_date:
+        date_info = f" [{from_date or 'any'} → {to_date or 'any'}]"
+    print(f"\n[1] Searching PubMed: '{query}' (max {max_results}){date_info}...")
     params = {
         "db": "pubmed",
         "term": query,
@@ -69,6 +86,12 @@ def search_pubmed(query: str, max_results: int, email: str, api_key: str) -> lis
         "retmode": "json",
         "email": email,
     }
+    if from_date or to_date:
+        params["datetype"] = "pdat"
+        if from_date:
+            params["mindate"] = from_date
+        if to_date:
+            params["maxdate"] = to_date
     if api_key:
         params["api_key"] = api_key
 
@@ -353,6 +376,8 @@ def main():
     parser.add_argument("--query",         required=True,  help='Search term, e.g. "tuberculosis drug resistance"')
     parser.add_argument("--max-results",   type=int, default=500, help="Max PubMed records to retrieve (default: 500)")
     parser.add_argument("--min-citations", type=int, default=10,  help="Minimum citation count to include (default: 10)")
+    parser.add_argument("--from-date",     default="",     help="Earliest publication date, DD-MM-YYYY (optional)")
+    parser.add_argument("--to-date",       default="",     help="Latest publication date, DD-MM-YYYY (optional)")
     parser.add_argument("--output-dir",    default="./reviews",   help="Folder to save PDFs and summary (default: ./reviews)")
     parser.add_argument("--email",         required=True,  help="Your email (required by NCBI)")
     parser.add_argument("--api-key",       default="",     help="NCBI API key (optional; raises rate limit from 3 to 10 req/s)")
@@ -362,8 +387,13 @@ def main():
 
     output_dir = Path(args.output_dir)
 
+    # Parse and validate dates
+    from_date = parse_date(args.from_date, "from-date") if args.from_date else ""
+    to_date   = parse_date(args.to_date,   "to-date")   if args.to_date   else ""
+
     # 1. Search
-    pmids = search_pubmed(args.query, args.max_results, args.email, args.api_key)
+    pmids = search_pubmed(args.query, args.max_results, args.email, args.api_key,
+                          from_date=from_date, to_date=to_date)
     if not pmids:
         print("No results. Exiting.")
         sys.exit(0)
