@@ -170,17 +170,18 @@ FIELD_TAGS = {"all": "", "title": "[ti]", "tiab": "[tiab]"}
 
 def search_pubmed(query: str, max_results: int, email: str, api_key: str,
                   from_date: str = "", to_date: str = "",
-                  field: str = "all") -> list[str]:
+                  field: str = "all", db: str = "pubmed") -> list[str]:
     tag = FIELD_TAGS.get(field, "")
     term = f"{query}{tag}" if tag else query
     date_info = ""
     if from_date or to_date:
         date_info = f" [{from_date or 'any'} → {to_date or 'any'}]"
     field_info = f" (field: {field})" if field != "all" else ""
-    print(f"\n[1] Searching PubMed: '{term}' (max {max_results}){date_info}{field_info}...")
+    db_label = "PubMed Central" if db == "pmc" else "PubMed"
+    print(f"\n[1] Searching {db_label}: '{term}' (max {max_results}){date_info}{field_info}...")
 
     base_params = {
-        "db": "pubmed",
+        "db": db,
         "term": term,
         "retmode": "json",
         "email": email,
@@ -199,7 +200,8 @@ def search_pubmed(query: str, max_results: int, email: str, api_key: str,
     r = ncbi_get(f"{EUTILS}/esearch.fcgi", count_params)
     total = int(json.loads(r.text, strict=False)["esearchresult"]["count"])
     to_fetch = min(max_results, total)
-    print(f"  Found {total} total results; will retrieve up to {to_fetch} PMIDs.")
+    id_label = "PMCIDs" if db == "pmc" else "PMIDs"
+    print(f"  Found {total} total results; will retrieve up to {to_fetch} {id_label}.")
 
     # PubMed hard-caps a single esearch at 9,999 records.
     # Workaround: sweep year-by-year and merge (deduplicating).
@@ -219,7 +221,7 @@ def search_pubmed(query: str, max_results: int, email: str, api_key: str,
         print(f"  {year}: +{len(new)} PMIDs  (total {len(pmids)} / {to_fetch})", end="\r")
         time.sleep(0.11)
 
-    print(f"  Retrieved {len(pmids)} PMIDs.{' ' * 40}")
+    print(f"  Retrieved {len(pmids)} {id_label}.{' ' * 40}")
     return pmids
 
 
@@ -555,6 +557,8 @@ def main():
     parser.add_argument("--output-dir",    default="./reviews",   help="Folder to save PDFs and summary (default: ./reviews)")
     parser.add_argument("--email",         required=True,  help="Your email (required by NCBI)")
     parser.add_argument("--api-key",       default="2e107b339d3ce35ba53f430c0863f9245808", help="NCBI API key (optional; raises rate limit from 3 to 10 req/s)")
+    parser.add_argument("--db",            default="pubmed", choices=["pubmed", "pmc"],
+                                           help="NCBI database to search: pubmed (default) or pmc (PubMed Central)")
     parser.add_argument("--field",         default="all", choices=["all", "title", "tiab"],
                                            help="Restrict query to: all fields (default), title only, or title+abstract")
     parser.add_argument("--reviews-only",  action="store_true",   help="Keep only Review, Systematic Review, and Meta-Analysis article types")
@@ -577,8 +581,14 @@ def main():
     else:
         from_date = parse_date(args.from_date, "from-date") if args.from_date else ""
         to_date   = parse_date(args.to_date,   "to-date")   if args.to_date   else ""
-        pmids = search_pubmed(args.query, args.max_results, args.email, args.api_key,
-                              from_date=from_date, to_date=to_date, field=args.field)
+        ids = search_pubmed(args.query, args.max_results, args.email, args.api_key,
+                            from_date=from_date, to_date=to_date, field=args.field,
+                            db=args.db)
+        if args.db == "pmc":
+            # esearch on pmc returns PMCIDs; convert to PMIDs for the rest of the pipeline
+            pmids = pmcids_to_pmids(ids, args.email, args.api_key)
+        else:
+            pmids = ids
 
     if not pmids:
         print("No results. Exiting.")
