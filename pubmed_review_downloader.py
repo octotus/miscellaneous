@@ -380,7 +380,7 @@ def main():
     parser.add_argument("--to-date",       default="",     help="Latest publication date, DD-MM-YYYY (optional)")
     parser.add_argument("--output-dir",    default="./reviews",   help="Folder to save PDFs and summary (default: ./reviews)")
     parser.add_argument("--email",         required=True,  help="Your email (required by NCBI)")
-    parser.add_argument("--api-key",       default="",     help="NCBI API key (optional; raises rate limit from 3 to 10 req/s)")
+    parser.add_argument("--api-key",       default="2e107b339d3ce35ba53f430c0863f9245808", help="NCBI API key (optional; raises rate limit from 3 to 10 req/s)")
     parser.add_argument("--no-download",   action="store_true",   help="Skip PDF download; only produce the summary TSV")
     parser.add_argument("--oa-comm-only",  action="store_true",   help="Only download PDFs with a commercial-friendly OA license (CC BY, CC BY-SA, CC BY-ND)")
     args = parser.parse_args()
