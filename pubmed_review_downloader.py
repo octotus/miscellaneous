@@ -74,6 +74,26 @@ def parse_date(date_str: str, label: str) -> str:
         sys.exit(1)
 
 
+PUBMED_MAX_PER_QUERY = 9999   # Hard NCBI limit for a single esearch call
+
+
+def _esearch_year(base_params: dict, year: int, want: int) -> list[str]:
+    """Fetch up to `want` PMIDs for a single calendar year."""
+    params = {
+        **base_params,
+        "datetype": "pdat",
+        "mindate": f"{year}/01/01",
+        "maxdate": f"{year}/12/31",
+        "retmax": min(want, PUBMED_MAX_PER_QUERY),
+    }
+    r = ncbi_get(f"{EUTILS}/esearch.fcgi", params)
+    esearch = json.loads(r.text, strict=False).get("esearchresult", {})
+    if "ERROR" in esearch or "error" in esearch:
+        print(f"\n  NCBI error ({year}): {esearch.get('ERROR') or esearch.get('error')}")
+        return []
+    return esearch.get("idlist", [])
+
+
 def search_pubmed(query: str, max_results: int, email: str, api_key: str,
                   from_date: str = "", to_date: str = "") -> list[str]:
     date_info = ""
@@ -87,46 +107,41 @@ def search_pubmed(query: str, max_results: int, email: str, api_key: str,
         "retmode": "json",
         "email": email,
     }
-    if from_date or to_date:
-        base_params["datetype"] = "pdat"
-        if from_date:
-            base_params["mindate"] = from_date
-        if to_date:
-            base_params["maxdate"] = to_date
     if api_key:
         base_params["api_key"] = api_key
 
-    # First call: get total count
-    r = ncbi_get(f"{EUTILS}/esearch.fcgi", {**base_params, "retmax": 0})
+    # Quick count without date filter to inform the user
+    count_params = {**base_params, "retmax": 0}
+    if from_date or to_date:
+        count_params["datetype"] = "pdat"
+        if from_date:
+            count_params["mindate"] = from_date
+        if to_date:
+            count_params["maxdate"] = to_date
+    r = ncbi_get(f"{EUTILS}/esearch.fcgi", count_params)
     total = int(json.loads(r.text, strict=False)["esearchresult"]["count"])
     to_fetch = min(max_results, total)
-    print(f"  Found {total} total results; will retrieve {to_fetch} PMIDs.")
+    print(f"  Found {total} total results; will retrieve up to {to_fetch} PMIDs.")
 
-    # Paginate in chunks of 10,000 (NCBI hard limit per request)
-    PAGE = 10_000
+    # PubMed hard-caps a single esearch at 9,999 records.
+    # Workaround: sweep year-by-year and merge (deduplicating).
+    from_year = int(from_date[:4]) if from_date else 1966
+    to_year   = int(to_date[:4])   if to_date   else datetime.now().year
+
+    seen: set[str] = set()
     pmids: list[str] = []
-    retstart = 0
-    while len(pmids) < to_fetch:
-        batch_size = min(PAGE, to_fetch - len(pmids))
-        r = ncbi_get(f"{EUTILS}/esearch.fcgi", {
-            **base_params,
-            "retmax": batch_size,
-            "retstart": retstart,
-        })
-        data = json.loads(r.text, strict=False)
-        esearch = data.get("esearchresult", {})
-        if "ERROR" in esearch or "error" in esearch:
-            print(f"\n  NCBI error: {esearch.get('ERROR') or esearch.get('error')}")
+    for year in range(to_year, from_year - 1, -1):   # newest first
+        if len(pmids) >= to_fetch:
             break
-        batch = esearch.get("idlist", [])
-        if not batch:
-            break
-        pmids.extend(batch)
-        retstart += len(batch)
-        print(f"  Retrieved {len(pmids)} / {to_fetch} PMIDs...", end="\r")
-        time.sleep(0.11)  # stay within rate limit
+        want = to_fetch - len(pmids)
+        batch = _esearch_year(base_params, year, want)
+        new = [p for p in batch if p not in seen]
+        seen.update(new)
+        pmids.extend(new)
+        print(f"  {year}: +{len(new)} PMIDs  (total {len(pmids)} / {to_fetch})", end="\r")
+        time.sleep(0.11)
 
-    print(f"  Retrieved {len(pmids)} PMIDs.{' ' * 20}")
+    print(f"  Retrieved {len(pmids)} PMIDs.{' ' * 40}")
     return pmids
 
 
