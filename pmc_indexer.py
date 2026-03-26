@@ -16,7 +16,6 @@ Requirements:
 import argparse
 import base64
 import json
-import os
 import re
 import sqlite3
 import struct
@@ -463,25 +462,12 @@ def cmd_index(args) -> None:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def _default_ollama_url() -> str:
-    """Return the Ollama base URL, auto-detecting the Windows host IP on WSL2."""
-    try:
-        with open("/proc/version") as fv:
-            if "microsoft" in fv.read().lower():
-                with open("/etc/resolv.conf") as fr:
-                    for line in fr:
-                        if line.startswith("nameserver"):
-                            ip = line.split()[1].strip()
-                            return f"http://{ip}:11434"
-    except OSError:
-        pass
-    return "http://localhost:11434"
-
-
 def main():
     parser = argparse.ArgumentParser(description="Index and search PMC full-text packages.")
     parser.add_argument("--db",          default=None,                  help="SQLite database path (default: <input-dir-name>.db)")
-    parser.add_argument("--ollama-url",  default=_default_ollama_url(), help="Ollama base URL (auto-detected on WSL2)")
+    parser.add_argument("--ollama-url",  default="http://localhost:11434",
+                        help="Ollama base URL (default: http://localhost:11434). "
+                             "On WSL2 with Ollama on Windows, use http://<windows-ip>:11434")
     parser.add_argument("--embed-model", default="nomic-embed-text",     help="Ollama embedding model")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
