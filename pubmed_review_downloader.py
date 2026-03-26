@@ -23,6 +23,7 @@ Requirements:
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -97,7 +98,7 @@ def search_pubmed(query: str, max_results: int, email: str, api_key: str,
 
     # First call: get total count
     r = ncbi_get(f"{EUTILS}/esearch.fcgi", {**base_params, "retmax": 0})
-    total = int(r.json()["esearchresult"]["count"])
+    total = int(json.loads(r.text, strict=False)["esearchresult"]["count"])
     to_fetch = min(max_results, total)
     print(f"  Found {total} total results; will retrieve {to_fetch} PMIDs.")
 
@@ -112,7 +113,7 @@ def search_pubmed(query: str, max_results: int, email: str, api_key: str,
             "retmax": batch_size,
             "retstart": retstart,
         })
-        batch = r.json()["esearchresult"]["idlist"]
+        batch = json.loads(r.text, strict=False)["esearchresult"]["idlist"]
         if not batch:
             break
         pmids.extend(batch)
@@ -235,7 +236,7 @@ def add_citation_counts(articles: list[dict]) -> None:
     for batch in chunked(pmids, 100):
         r = requests.get(ICITE, params={"pmids": ",".join(batch)}, timeout=30)
         r.raise_for_status()
-        for pub in r.json().get("data", []):
+        for pub in json.loads(r.text, strict=False).get("data", []):
             counts[str(pub["pmid"])] = pub.get("citation_count", 0)
         time.sleep(0.2)
 
@@ -268,7 +269,7 @@ def resolve_pmc_ids(articles: list[dict], email: str) -> None:
         )
         if not r.ok:
             continue
-        data = r.json()
+        data = json.loads(r.text, strict=False)
         id_map = {rec.get("pmid", ""): rec.get("pmcid", "") for rec in data.get("records", [])}
         for a in batch:
             a["pmc_id"] = id_map.get(a["pmid"], "").replace("PMC", "")
