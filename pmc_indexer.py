@@ -402,10 +402,12 @@ def cmd_search(args) -> None:
 
 def cmd_index(args) -> None:
     input_dir  = Path(args.input_dir)
-    paper_dirs = sorted(d for d in input_dir.iterdir()
+    if args.db is None:
+        args.db = str(input_dir.resolve().name) + ".db"
+    paper_dirs = sorted(d for d in input_dir.rglob("PMC*")
                         if d.is_dir() and re.match(r'^PMC\d+$', d.name, re.IGNORECASE))
     if not paper_dirs:
-        print(f"No PMC{{id}} subdirectories found in '{input_dir}'.")
+        print(f"No PMC{{id}} subdirectories found under '{input_dir}'.")
         sys.exit(1)
 
     con = open_db(args.db)
@@ -451,7 +453,7 @@ def cmd_index(args) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Index and search PMC full-text packages.")
-    parser.add_argument("--db",          default="./pmc_index.db",      help="SQLite database path (default: ./pmc_index.db)")
+    parser.add_argument("--db",          default=None,                  help="SQLite database path (default: <input-dir-name>.db)")
     parser.add_argument("--ollama-url",  default="http://localhost:11434", help="Ollama base URL")
     parser.add_argument("--embed-model", default="nomic-embed-text",     help="Ollama embedding model")
 
@@ -468,8 +470,11 @@ def main():
     ps = sub.add_parser("search", help="Search the index")
     ps.add_argument("--query",  required=True,     help="Search query")
     ps.add_argument("--top-k",  type=int, default=10, help="Number of results (default: 10)")
+    ps.set_defaults(db_required=True)
 
     args = parser.parse_args()
+    if getattr(args, "db_required", False) and args.db is None:
+        parser.error("--db is required for the search subcommand")
     if args.cmd == "index":
         cmd_index(args)
     else:
