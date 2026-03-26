@@ -376,7 +376,7 @@ def add_citation_counts(articles: list[dict]) -> None:
 
 def filter_by_citations(articles: list[dict], min_citations: int) -> list[dict]:
     filtered = [a for a in articles if a["citations"] >= min_citations]
-    print(f"  Filtered to {len(filtered)} reviews with ≥ {min_citations} citations.")
+    print(f"  Filtered to {len(filtered)} articles with ≥ {min_citations} citations.")
     return filtered
 
 
@@ -504,7 +504,7 @@ def download_articles(articles: list[dict], output_dir: Path,
     downloaded = 0
 
     for i, a in enumerate(articles):
-        print(f"  Checking {i+1}/{total}...", end="\r")
+        print(f"  Checked {i+1}/{total}  |  Downloaded {downloaded}/{total}", end="\r")
 
         if not a["pmc_id"]:
             no_pmc += 1
@@ -568,13 +568,10 @@ def download_articles(articles: list[dict], output_dir: Path,
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
 
-            title_short = a["title"][:80] + ("…" if len(a["title"]) > 80 else "")
-            print(f"  [{downloaded + already + 1}] PMID {a['pmid']} — {title_short}")
             a["downloaded"] = True
             downloaded += 1
         except Exception as e:
             failed += 1
-            print(f"  PMID {a['pmid']} — download failed: {e}")
 
         time.sleep(0.5)
 
@@ -694,9 +691,6 @@ def main():
     save_summary(filtered, output_dir)
 
     print(f"\nDone. {len(filtered)} articles meet your criteria.")
-    if not args.no_download:
-        downloaded = sum(1 for a in filtered if a["downloaded"])
-        print(f"  {downloaded} PDFs downloaded (rest are not open access).")
 
 
 if __name__ == "__main__":
