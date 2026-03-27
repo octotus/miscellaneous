@@ -249,9 +249,27 @@ def chunk_words(text: str, size: int = 400, overlap: int = 50) -> list[str]:
 
 # ── Ollama ─────────────────────────────────────────────────────────────────────
 
+def check_ollama(ollama_url: str) -> None:
+    """Verify Ollama is reachable; exit with a clear message if not."""
+    try:
+        r = requests.get(f"{ollama_url}/api/tags", timeout=(5, 10))
+        r.raise_for_status()
+    except requests.exceptions.ConnectionError as e:
+        print(f"\nCannot reach Ollama at {ollama_url}")
+        print("  - Check the URL and port (default: 11434)")
+        print("  - If Ollama is on another machine, ensure it is bound to 0.0.0.0:")
+        print("    Windows: set OLLAMA_HOST=0.0.0.0 in system env vars, then restart Ollama")
+        print("    Linux:   OLLAMA_HOST=0.0.0.0 ollama serve")
+        print(f"  - Raw error: {e}")
+        sys.exit(1)
+    except requests.exceptions.Timeout:
+        print(f"\nOllama at {ollama_url} did not respond within 5 seconds.")
+        print("  - The host may be firewalled or the port blocked.")
+        sys.exit(1)
+
 def embed(text: str, model: str, ollama_url: str) -> list[float]:
     r = requests.post(f"{ollama_url}/api/embeddings",
-                      json={"model": model, "prompt": text}, timeout=60)
+                      json={"model": model, "prompt": text}, timeout=(5, 120))
     r.raise_for_status()
     return r.json()["embedding"]
 
@@ -269,7 +287,7 @@ def interpret_figure(image_path: str, model: str, ollama_url: str) -> str:
               "key data or findings shown, axes and labels if present, and the main conclusion.")
     r = requests.post(f"{ollama_url}/api/generate",
                       json={"model": model, "prompt": prompt, "images": [b64], "stream": False},
-                      timeout=120)
+                      timeout=(5, 180))
     r.raise_for_status()
     return r.json().get("response", "").strip()
 
@@ -351,6 +369,7 @@ def cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb)) if na and nb else 0.0
 
 def cmd_search(args) -> None:
+    check_ollama(args.ollama_url)
     if not Path(args.db).exists():
         print(f"Database not found: {args.db}")
         sys.exit(1)
@@ -401,6 +420,7 @@ def cmd_search(args) -> None:
 # ── Index ──────────────────────────────────────────────────────────────────────
 
 def cmd_index(args) -> None:
+    check_ollama(args.ollama_url)
     input_dir  = Path(args.input_dir)
     if args.db is None:
         args.db = str(input_dir.resolve().name) + ".db"
