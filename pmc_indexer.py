@@ -16,6 +16,7 @@ Requirements:
 import argparse
 import base64
 import json
+import textwrap
 import re
 import sqlite3
 import struct
@@ -483,32 +484,201 @@ def cmd_index(args) -> None:
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    _ollama_args = dict(
-        flags=["--ollama-url"],
-        kwargs=dict(default="http://localhost:11434",
-                    help="Ollama base URL (default: http://localhost:11434). "
-                         "On WSL2 with Ollama on Windows, use http://<windows-ip>:11434"),
-    )
-    _shared = argparse.ArgumentParser(add_help=False)
-    _shared.add_argument("--db",          default=None,               help="SQLite database path (default: <input-dir-name>.db for index, required for search)")
-    _shared.add_argument("--ollama-url",  **_ollama_args["kwargs"])
-    _shared.add_argument("--embed-model", default="nomic-embed-text", help="Ollama embedding model")
+    top_desc = textwrap.dedent("""\
+        PMC full-text indexer and semantic search tool.
 
-    parser = argparse.ArgumentParser(description="Index and search PMC full-text packages.",
-                                     parents=[_shared])
+        Parses JATS/NLM XML packages downloaded from PubMed Central, extracts
+        sections, figures, and tables, embeds text chunks via an Ollama embedding
+        model, and stores everything in a local SQLite database.  A cosine-
+        similarity search command retrieves the most relevant passages and links
+        them to their source figures or tables.
+
+        Subcommands
+        -----------
+          index   Parse and embed a folder of PMC packages into a database.
+          search  Query an existing database with a natural-language question.
+
+        Quick start
+        -----------
+          # Index a folder of downloaded PMC packages (skip vision for speed):
+          python pmc_indexer.py index --input-dir ./reviews --skip-vision \\
+              --ollama-url http://192.168.4.35:11434
+
+          # Search the resulting database:
+          python pmc_indexer.py search --db reviews.db \\
+              --query "role of TNF-alpha in leukemia" \\
+              --ollama-url http://192.168.4.35:11434
+    """)
+
+    shared_desc = textwrap.dedent("""\
+        Shared options (accepted by both index and search):
+          --db            Path to the SQLite database file.
+          --ollama-url    Base URL of the Ollama server.
+          --embed-model   Ollama model used to generate text embeddings.
+    """)
+
+    _shared = argparse.ArgumentParser(add_help=False)
+    _shared.add_argument(
+        "--db",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to the SQLite database file.  "
+            "For 'index': defaults to <input-dir-name>.db in the current directory.  "
+            "For 'search': required."
+        ),
+    )
+    _shared.add_argument(
+        "--ollama-url",
+        default="http://localhost:11434",
+        metavar="URL",
+        help=(
+            "Base URL of the Ollama server (default: http://localhost:11434).  "
+            "If Ollama is running on a remote or Windows host, supply its IP address, "
+            "e.g. http://192.168.4.35:11434.  "
+            "Ollama must be configured with OLLAMA_HOST=0.0.0.0 to accept external connections."
+        ),
+    )
+    _shared.add_argument(
+        "--embed-model",
+        default="nomic-embed-text",
+        metavar="MODEL",
+        help=(
+            "Ollama model used to embed text chunks and queries "
+            "(default: nomic-embed-text).  "
+            "Recommended: nomic-embed-text:latest.  "
+            "Must be the same model for both indexing and searching a given database."
+        ),
+    )
+
+    parser = argparse.ArgumentParser(
+        description=top_desc,
+        epilog=shared_desc,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[_shared],
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    pi = sub.add_parser("index", parents=[_shared], help="Index a directory of extracted PMC packages")
-    pi.add_argument("--input-dir",     required=True,         help="Folder containing PMC{id}/ subdirectories")
-    pi.add_argument("--vision-model",  default="llava",       help="Ollama vision model for figure interpretation (default: llava)")
-    pi.add_argument("--chunk-size",    type=int, default=400, help="Max words per chunk (default: 400)")
-    pi.add_argument("--chunk-overlap", type=int, default=50,  help="Word overlap between chunks (default: 50)")
-    pi.add_argument("--skip-vision",   action="store_true",   help="Skip figure interpretation")
-    pi.add_argument("--reindex",       action="store_true",   help="Reprocess already-indexed papers")
+    # ── index ──────────────────────────────────────────────────────────────────
+    index_desc = textwrap.dedent("""\
+        Walk --input-dir recursively, find every PMC{id}/ subfolder, parse its
+        JATS XML file (.xml or .nxml), embed all text chunks, and store the result
+        in a SQLite database.  Already-indexed papers are skipped unless --reindex
+        is given.
 
-    ps = sub.add_parser("search", parents=[_shared], help="Search the index")
-    ps.add_argument("--query",  required=True,        help="Search query")
-    ps.add_argument("--top-k",  type=int, default=10, help="Number of results (default: 10)")
+        What gets indexed per paper
+        ---------------------------
+          - Section text, split into overlapping word-chunks and embedded.
+          - Figure captions and (optionally) vision-model interpretations of the
+            figure images, each embedded as a separate chunk.
+          - Table captions and rendered Markdown content, each embedded.
+          - Cross-reference links between text chunks and their figures/tables.
+
+        Recommended models
+        ------------------
+          --embed-model   nomic-embed-text:latest
+          --vision-model  gemma3:4b   (handles both text and vision)
+    """)
+    pi = sub.add_parser(
+        "index",
+        parents=[_shared],
+        help="Parse and embed a folder of PMC packages into a database.",
+        description=index_desc,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    pi.add_argument(
+        "--input-dir",
+        required=True,
+        metavar="DIR",
+        help=(
+            "Root folder to search for PMC packages.  "
+            "The script walks all subdirectories and indexes every folder whose "
+            "name matches PMC<digits> (e.g. PMC5030376/).  "
+            "Each such folder must contain at least one .xml or .nxml file."
+        ),
+    )
+    pi.add_argument(
+        "--vision-model",
+        default="llava",
+        metavar="MODEL",
+        help=(
+            "Ollama vision model used to generate text descriptions of figure images "
+            "(default: llava).  Recommended: gemma3:4b.  "
+            "Ignored when --skip-vision is set."
+        ),
+    )
+    pi.add_argument(
+        "--chunk-size",
+        type=int,
+        default=400,
+        metavar="WORDS",
+        help=(
+            "Maximum number of words per text chunk before it is split "
+            "(default: 400).  Smaller values produce more granular search results "
+            "but increase embedding time and database size."
+        ),
+    )
+    pi.add_argument(
+        "--chunk-overlap",
+        type=int,
+        default=50,
+        metavar="WORDS",
+        help=(
+            "Number of words of overlap between consecutive chunks (default: 50).  "
+            "Overlap ensures that sentences near chunk boundaries are not lost."
+        ),
+    )
+    pi.add_argument(
+        "--skip-vision",
+        action="store_true",
+        help=(
+            "Do not run the vision model on figure images.  "
+            "Figure captions are still embedded.  "
+            "Use this flag for faster indexing when image interpretation is not needed "
+            "or when no vision-capable model is available."
+        ),
+    )
+    pi.add_argument(
+        "--reindex",
+        action="store_true",
+        help=(
+            "Re-parse and re-embed papers that are already present in the database.  "
+            "Without this flag, papers with an existing entry are skipped.  "
+            "Use after changing chunk size, overlap, or embedding model."
+        ),
+    )
+
+    # ── search ─────────────────────────────────────────────────────────────────
+    search_desc = textwrap.dedent("""\
+        Embed the query with the same model used during indexing, compute cosine
+        similarity against every chunk in the database, and print the top-k results.
+        Each result shows the source paper (PMC ID), section title, a text preview,
+        and any figures or tables cross-referenced by that chunk.
+    """)
+    ps = sub.add_parser(
+        "search",
+        parents=[_shared],
+        help="Query an existing database with a natural-language question.",
+        description=search_desc,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ps.add_argument(
+        "--query",
+        required=True,
+        metavar="TEXT",
+        help="Natural-language search query, e.g. \"TNF-alpha signalling in AML\".",
+    )
+    ps.add_argument(
+        "--top-k",
+        type=int,
+        default=10,
+        metavar="N",
+        help=(
+            "Number of top-scoring chunks to return (default: 10).  "
+            "Results are ranked by cosine similarity between the query embedding "
+            "and each chunk embedding."
+        ),
+    )
     ps.set_defaults(db_required=True)
 
     args = parser.parse_args()
