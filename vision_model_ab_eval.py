@@ -16,6 +16,7 @@ import argparse
 import json
 import random
 import re
+import sqlite3
 import statistics
 import sys
 import time
@@ -102,6 +103,106 @@ def model_response(image_path: str, model: str, ollama_url: str, timeout_s: int)
     return response.json().get("response", "").strip()
 
 
+def store_paper_with_cached_vision(
+    con: sqlite3.Connection,
+    paper: pmc_indexer.PaperData,
+    embed_model: str,
+    ollama_url: str,
+    figure_interpretations: dict[str, str],
+    chunk_size: int,
+    chunk_overlap: int,
+) -> None:
+    with con:
+        old_chunk_ids = [
+            row[0]
+            for row in con.execute("SELECT id FROM chunks WHERE paper_id=?", (paper.pmc_id,)).fetchall()
+        ]
+        if old_chunk_ids:
+            con.executemany("DELETE FROM xrefs WHERE chunk_id=?", [(chunk_id,) for chunk_id in old_chunk_ids])
+        con.execute("DELETE FROM chunks WHERE paper_id=?", (paper.pmc_id,))
+        con.execute("DELETE FROM figures WHERE paper_id=?", (paper.pmc_id,))
+        con.execute("DELETE FROM tables WHERE paper_id=?", (paper.pmc_id,))
+        con.execute("DELETE FROM papers WHERE id=?", (paper.pmc_id,))
+
+        con.execute(
+            "INSERT OR REPLACE INTO papers VALUES (?,?,?,?,?,?)",
+            (paper.pmc_id, paper.title, paper.authors, paper.year, paper.xml_path, int(time.time())),
+        )
+
+        for fig in paper.figures:
+            row_id = str(pmc_indexer.uuid.uuid4())
+            interp = figure_interpretations.get(fig.fig_id, "")
+            con.execute(
+                "INSERT OR REPLACE INTO figures VALUES (?,?,?,?,?,?,?)",
+                (row_id, paper.pmc_id, fig.fig_id, fig.label, fig.caption, fig.image_path, interp),
+            )
+
+            for text, ctype in ((fig.caption, "figure_legend"), (interp, "figure_interpretation")):
+                for ct in pmc_indexer.chunk_words(text, chunk_size, chunk_overlap):
+                    cid = str(pmc_indexer.uuid.uuid4())
+                    con.execute(
+                        "INSERT INTO chunks VALUES (?,?,?,?,?,?,?)",
+                        (
+                            cid,
+                            paper.pmc_id,
+                            ctype,
+                            fig.label,
+                            fig.fig_id,
+                            ct,
+                            pmc_indexer.pack_emb(pmc_indexer.embed(ct, embed_model, ollama_url)),
+                        ),
+                    )
+
+        for tbl in paper.tables:
+            row_id = str(pmc_indexer.uuid.uuid4())
+            con.execute(
+                "INSERT OR REPLACE INTO tables VALUES (?,?,?,?,?,?)",
+                (row_id, paper.pmc_id, tbl.table_id, tbl.label, tbl.caption, tbl.content_markdown),
+            )
+
+            for text, ctype in ((tbl.caption, "table_caption"), (tbl.content_markdown, "table_content")):
+                for ct in pmc_indexer.chunk_words(text, chunk_size, chunk_overlap):
+                    cid = str(pmc_indexer.uuid.uuid4())
+                    con.execute(
+                        "INSERT INTO chunks VALUES (?,?,?,?,?,?,?)",
+                        (
+                            cid,
+                            paper.pmc_id,
+                            ctype,
+                            tbl.label,
+                            tbl.table_id,
+                            ct,
+                            pmc_indexer.pack_emb(pmc_indexer.embed(ct, embed_model, ollama_url)),
+                        ),
+                    )
+
+        for sec_title, para in pmc_indexer.flatten_sections(paper.sections):
+            if not para.text:
+                continue
+            chunk_ids = []
+            for ct in pmc_indexer.chunk_words(para.text, chunk_size, chunk_overlap):
+                cid = str(pmc_indexer.uuid.uuid4())
+                chunk_ids.append(cid)
+                con.execute(
+                    "INSERT INTO chunks VALUES (?,?,?,?,?,?,?)",
+                    (
+                        cid,
+                        paper.pmc_id,
+                        "section",
+                        sec_title,
+                        "",
+                        ct,
+                        pmc_indexer.pack_emb(pmc_indexer.embed(ct, embed_model, ollama_url)),
+                    ),
+                )
+            for cid in chunk_ids:
+                for xref in para.xrefs:
+                    con.execute(
+                        "INSERT OR IGNORE INTO xrefs VALUES (?,?,?)",
+                        (cid, xref.ref_type, xref.rid),
+                    )
+
+
 def discover_cases(input_dir: Path) -> list[FigureCase]:
     cases: list[FigureCase] = []
     for paper_dir in sorted(p for p in input_dir.iterdir() if p.is_dir() and p.name.startswith("PMC")):
@@ -142,8 +243,13 @@ def sample_cases(cases: list[FigureCase], paper_sample_size: int, seed: int) -> 
     return sampled_papers, sampled_cases
 
 
-def aggregate_results(records: list[dict], model_key: str) -> dict[str, float | int]:
-    nonempty = [record for record in records if record[model_key]["response"]]
+def aggregate_results(records: list[dict], model_name: str) -> dict[str, float | int]:
+    model_records = [
+        record["results"][model_name]
+        for record in records
+        if model_name in record.get("results", {})
+    ]
+    nonempty = [record for record in model_records if record["response"]]
     if not records:
         return {
             "cases": 0,
@@ -161,20 +267,29 @@ def aggregate_results(records: list[dict], model_key: str) -> dict[str, float | 
         return round(statistics.fmean(values), 4) if values else 0.0
 
     return {
-        "cases": len(records),
-        "nonempty_rate": round(len(nonempty) / len(records), 4),
-        "avg_word_count": mean([record[model_key]["metrics"]["word_count"] for record in records]),
-        "avg_unique_token_count": mean([record[model_key]["metrics"]["unique_token_count"] for record in records]),
-        "axis_or_label_rate": mean([record[model_key]["metrics"]["mentions_axis_or_label"] for record in records]),
-        "conclusion_rate": mean([record[model_key]["metrics"]["mentions_conclusion"] for record in records]),
-        "figure_type_rate": mean([record[model_key]["metrics"]["mentions_figure_type"] for record in records]),
-        "avg_caption_recall": mean([record[model_key]["metrics"]["caption_recall"] for record in records]),
-        "avg_latency_s": mean([record[model_key]["latency_s"] for record in records]),
+        "cases": len(model_records),
+        "nonempty_rate": round(len(nonempty) / len(model_records), 4) if model_records else 0.0,
+        "avg_word_count": mean([record["metrics"]["word_count"] for record in model_records]),
+        "avg_unique_token_count": mean([record["metrics"]["unique_token_count"] for record in model_records]),
+        "axis_or_label_rate": mean([record["metrics"]["mentions_axis_or_label"] for record in model_records]),
+        "conclusion_rate": mean([record["metrics"]["mentions_conclusion"] for record in model_records]),
+        "figure_type_rate": mean([record["metrics"]["mentions_figure_type"] for record in model_records]),
+        "avg_caption_recall": mean([record["metrics"]["caption_recall"] for record in model_records]),
+        "avg_latency_s": mean([record["latency_s"] for record in model_records]),
     }
 
 
 def sanitize_model_name(model: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", model)
+
+
+def make_case_key(case: FigureCase | dict) -> tuple[str, str]:
+    return (str(case["paper_id"]) if isinstance(case, dict) else case.paper_id, str(case["figure_id"]) if isinstance(case, dict) else case.figure_id)
+
+
+def has_saved_model_result(record: dict, model_name: str) -> bool:
+    result = record.get("results", {}).get(model_name)
+    return isinstance(result, dict) and "response" in result and "metrics" in result
 
 
 def progress_bar(current: int, total: int, width: int = PROGRESS_BAR_WIDTH) -> str:
@@ -239,22 +354,21 @@ def write_markdown_report(
     sampled_papers: list[str],
     records: list[dict],
     summary: dict,
-    model_a: str,
-    model_b: str,
+    models: list[str],
 ) -> None:
     lines = [
-        "# Vision Model A/B Evaluation",
+        "# Vision Model Evaluation",
         "",
-        f"- Model A: `{model_a}`",
-        f"- Model B: `{model_b}`",
+        f"- Models: {', '.join(f'`{model}`' for model in models)}",
         f"- Sampled papers: {len(sampled_papers)}",
-        f"- Figure cases: {len(records)}",
+        f"- Completed papers: {summary['completed_papers']} / {len(sampled_papers)}",
+        f"- Completed figure cases: {summary['completed_figure_cases']} / {summary['figure_case_count']}",
         f"- Seed: `{summary['seed']}`",
         "",
         "## Aggregate Metrics",
         "",
-        "| Metric | Model A | Model B |",
-        "| --- | ---: | ---: |",
+        "| Metric | " + " | ".join(models) + " |",
+        "| --- | " + " | ".join(["---:"] * len(models)) + " |",
     ]
 
     keys = [
@@ -268,7 +382,8 @@ def write_markdown_report(
         "avg_latency_s",
     ]
     for key in keys:
-        lines.append(f"| `{key}` | {summary['aggregate']['model_a'][key]} | {summary['aggregate']['model_b'][key]} |")
+        values = [str(summary["aggregate"][model][key]) for model in models]
+        lines.append(f"| `{key}` | " + " | ".join(values) + " |")
 
     lines.extend(
         [
@@ -295,18 +410,84 @@ def write_markdown_report(
                 "",
                 case["caption"] or "_No caption_",
                 "",
-                f"**Model A: `{model_a}`**",
-                "",
-                record["model_a"]["response"] or "_Empty response_",
-                "",
-                f"**Model B: `{model_b}`**",
-                "",
-                record["model_b"]["response"] or "_Empty response_",
-                "",
             ]
         )
+        for model in models:
+            result = record.get("results", {}).get(model, {})
+            lines.extend(
+                [
+                    f"**Model: `{model}`**",
+                    "",
+                    result.get("response", "") or "_Empty response_",
+                    "",
+                ]
+            )
 
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def build_summary(
+    input_dir: Path,
+    sampled_papers: list[str],
+    total_figure_cases: int,
+    records: list[dict],
+    seed: int,
+    completed_papers: int,
+    models: list[str],
+) -> dict:
+    completed_cases = sum(
+        1 for record in records
+        if all(model in record.get("results", {}) for model in models)
+    )
+    return {
+        "input_dir": str(input_dir),
+        "prompt": PROMPT,
+        "seed": seed,
+        "sampled_papers": sampled_papers,
+        "completed_papers": completed_papers,
+        "remaining_papers": max(0, len(sampled_papers) - completed_papers),
+        "completed_figure_cases": completed_cases,
+        "figure_case_count": total_figure_cases,
+        "models": models,
+        "aggregate": {model: aggregate_results(records, model) for model in models},
+    }
+
+
+def write_reports(
+    output_dir: Path,
+    stem: str,
+    sampled_papers: list[str],
+    records: list[dict],
+    summary: dict,
+    models: list[str],
+) -> tuple[Path, Path]:
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    json_payload = {
+        "summary": summary,
+        "records": records,
+    }
+    json_path.write_text(json.dumps(json_payload, indent=2), encoding="utf-8")
+    write_markdown_report(md_path, sampled_papers, records, summary, models)
+    return json_path, md_path
+
+
+def load_existing_results(json_path: Path, sampled_papers: list[str]) -> tuple[list[dict], dict[tuple[str, str], dict]]:
+    if not json_path.exists():
+        return [], {}
+
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    summary = data.get("summary", {})
+    existing_sampled_papers = summary.get("sampled_papers")
+    if existing_sampled_papers and existing_sampled_papers != sampled_papers:
+        raise ValueError("Existing results file uses a different sampled paper set.")
+
+    records = data.get("records", [])
+    record_map = {
+        make_case_key(record["case"]): record
+        for record in records
+    }
+    return records, record_map
 
 
 def parse_args() -> argparse.Namespace:
@@ -317,14 +498,10 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing extracted PMC paper folders.",
     )
     parser.add_argument(
-        "--model-a",
-        default="gemma3:4b",
-        help="First Ollama vision model.",
-    )
-    parser.add_argument(
-        "--model-b",
-        default="moondream2",
-        help="Second Ollama vision model.",
+        "--models",
+        nargs="+",
+        default=["gemma3:4b", "moondream2", "qwen2.5vl:7b", "llava-phi3", "llava-llama3"],
+        help="Vision models to run sequentially for each figure.",
     )
     parser.add_argument(
         "--paper-sample-size",
@@ -351,8 +528,30 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="/home/k/Claude_Projects/Fibles/miscellaneous/vision_eval_outputs",
+        default="/home/k/Claude_Projects/Fibles/miscellaneous/vision_model_eval",
         help="Directory for JSON and Markdown reports.",
+    )
+    parser.add_argument(
+        "--embed-model",
+        default="nomic-embed-text:latest",
+        help="Ollama embedding model used when checkpointing per-model SQLite indexes.",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=400,
+        help="Chunk size used when checkpointing per-model SQLite indexes.",
+    )
+    parser.add_argument(
+        "--chunk-overlap",
+        type=int,
+        default=50,
+        help="Chunk overlap used when checkpointing per-model SQLite indexes.",
+    )
+    parser.add_argument(
+        "--write-index",
+        action="store_true",
+        help="Also checkpoint model-specific SQLite indexes after each paper completes.",
     )
     return parser.parse_args()
 
@@ -360,6 +559,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     started_at = time.time()
     args = parse_args()
+    models = args.models
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -378,15 +578,51 @@ def main() -> int:
         cases_by_paper.setdefault(case.paper_id, []).append(case)
 
     status_panel = StatusPanel()
-    records: list[dict] = []
-    figure_idx = 0
     total_papers = len(sampled_papers)
     total_figures = len(sampled_cases)
+    stem = (
+        f"vision_eval_{'__'.join(sanitize_model_name(model) for model in models)}"
+        f"_papers{args.paper_sample_size}_seed{args.seed}"
+    )
+    json_path = output_dir / f"{stem}.json"
+    md_path = output_dir / f"{stem}.md"
+    records, record_map = load_existing_results(json_path, sampled_papers)
+    completed_case_keys = {
+        key for key, record in record_map.items()
+        if all(has_saved_model_result(record, model) for model in models)
+    }
+    figure_idx = len(completed_case_keys)
+    db_paths = {
+        model: output_dir / f"{stem}_{sanitize_model_name(model)}.db"
+        for model in models
+    }
+    connections = {
+        model: pmc_indexer.open_db(str(path))
+        for model, path in db_paths.items()
+    } if args.write_index else {}
+    indexed_ids = {
+        model: {row[0] for row in con.execute("SELECT id FROM papers").fetchall()}
+        for model, con in connections.items()
+    }
     for paper_idx, paper_id in enumerate(sampled_papers, start=1):
         paper_cases = cases_by_paper.get(paper_id, [])
         paper_figure_total = len(paper_cases)
+        paper = None
+        if paper_cases:
+            paper_dir = Path(paper_cases[0].xml_path).parent
+            paper = pmc_indexer.parse_jats(Path(paper_cases[0].xml_path), paper_dir)
         for paper_figure_idx, case in enumerate(paper_cases, start=1):
-            figure_idx += 1
+            case_key = make_case_key(case)
+            record = record_map.get(case_key)
+            if record is None:
+                record = {"case": asdict(case), "results": {}}
+                record_map[case_key] = record
+                records.append(record)
+            elif "results" not in record:
+                record["results"] = {}
+
+            if not all(has_saved_model_result(record, model) for model in models):
+                figure_idx += 1
             status_panel.render(
                 paper_idx=paper_idx,
                 total_papers=total_papers,
@@ -398,8 +634,9 @@ def main() -> int:
                 figure_label=case.label or case.figure_id,
                 started_at=started_at,
             )
-            row = {"case": asdict(case)}
-            for model_key, model_name in (("model_a", args.model_a), ("model_b", args.model_b)):
+            for model_name in models:
+                if has_saved_model_result(record, model_name):
+                    continue
                 started = time.time()
                 try:
                     response = model_response(case.image_path, model_name, args.ollama_url, args.timeout_s)
@@ -410,45 +647,85 @@ def main() -> int:
                 latency_s = round(time.time() - started, 3)
                 metrics = prompt_score(response)
                 metrics.update(caption_overlap(case.caption, response))
-                row[model_key] = {
+                record["results"][model_name] = {
                     "model": model_name,
                     "latency_s": latency_s,
                     "error": error,
                     "response": response,
                     "metrics": metrics,
                 }
-            records.append(row)
+        if args.write_index and paper is not None:
+            paper_records = {
+                make_case_key(record["case"]): record
+                for record in records
+                if record["case"]["paper_id"] == paper_id
+            }
+            for model_name in models:
+                if paper_id in indexed_ids.get(model_name, set()):
+                    continue
+                if not all(
+                    has_saved_model_result(paper_records.get(make_case_key(case), {}), model_name)
+                    for case in paper_cases
+                ):
+                    continue
+                figure_interpretations = {
+                    case.figure_id: paper_records[make_case_key(case)]["results"][model_name]["response"]
+                    for case in paper_cases
+                }
+                store_paper_with_cached_vision(
+                    con=connections[model_name],
+                    paper=paper,
+                    embed_model=args.embed_model,
+                    ollama_url=args.ollama_url,
+                    figure_interpretations=figure_interpretations,
+                    chunk_size=args.chunk_size,
+                    chunk_overlap=args.chunk_overlap,
+                )
+                indexed_ids[model_name].add(paper_id)
+        summary = build_summary(
+            input_dir=input_dir,
+            sampled_papers=sampled_papers,
+            total_figure_cases=total_figures,
+            records=records,
+            seed=args.seed,
+            completed_papers=paper_idx,
+            models=models,
+        )
+        json_path, md_path = write_reports(
+            output_dir=output_dir,
+            stem=stem,
+            sampled_papers=sampled_papers,
+            records=records,
+            summary=summary,
+            models=models,
+        )
     status_panel.finish()
+    for con in connections.values():
+        con.close()
 
-    summary = {
-        "input_dir": str(input_dir),
-        "prompt": PROMPT,
-        "seed": args.seed,
-        "sampled_papers": sampled_papers,
-        "figure_case_count": len(sampled_cases),
-        "aggregate": {
-            "model_a": aggregate_results(records, "model_a"),
-            "model_b": aggregate_results(records, "model_b"),
-        },
-    }
-
-    stem = (
-        f"vision_ab_eval_{sanitize_model_name(args.model_a)}"
-        f"_vs_{sanitize_model_name(args.model_b)}"
-        f"_papers{args.paper_sample_size}_seed{args.seed}"
+    summary = build_summary(
+        input_dir=input_dir,
+        sampled_papers=sampled_papers,
+        total_figure_cases=total_figures,
+        records=records,
+        seed=args.seed,
+        completed_papers=total_papers,
+        models=models,
     )
-    json_path = output_dir / f"{stem}.json"
-    md_path = output_dir / f"{stem}.md"
-
-    json_payload = {
-        "summary": summary,
-        "records": records,
-    }
-    json_path.write_text(json.dumps(json_payload, indent=2), encoding="utf-8")
-    write_markdown_report(md_path, sampled_papers, records, summary, args.model_a, args.model_b)
+    json_path, md_path = write_reports(
+        output_dir=output_dir,
+        stem=stem,
+        sampled_papers=sampled_papers,
+        records=records,
+        summary=summary,
+        models=models,
+    )
 
     print(f"[done] wrote {json_path}")
     print(f"[done] wrote {md_path}")
+    if args.write_index:
+        for path in db_paths.values():
+            print(f"[done] wrote {path}")
     return 0
 
 
