@@ -355,15 +355,13 @@ class StatusPanel:
         figure_label: str,
         started_at: float,
     ) -> None:
-        elapsed_s = int(max(0, time.time() - started_at))
-        hours, rem = divmod(elapsed_s, 3600)
-        minutes, seconds = divmod(rem, 60)
-        timer = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        del started_at
+        wall_clock = time.strftime("%H:%M:%S")
         lines = [
             f"[paper]   {progress_bar(paper_idx, total_papers)} {paper_id}",
             f"[figure]  {progress_bar(figure_idx, total_figures)} {paper_id} {figure_label}",
             f"[inpaper] {progress_bar(paper_figure_idx, total_paper_figures)} {paper_id}",
-            f"[elapsed] {timer}",
+            f"[clock]   {wall_clock}",
         ]
 
         if self.enabled:
@@ -454,6 +452,8 @@ def write_markdown_report(
                 [
                     f"**Model: `{model}`**",
                     "",
+                    f"- Processing time: `{result.get('latency_s', '')} s`" if "latency_s" in result else "- Processing time: `_unknown_`",
+                    "",
                     result.get("response", "") or "_Empty response_",
                     "",
                 ]
@@ -536,7 +536,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        default=["gemma3:4b", "moondream2", "qwen2.5vl:7b", "llava-phi3", "llava-llama3:latest"],
+        default=["gemma3:4b", "moondream2", "qwen2.5vl:7b", "llava-phi3:latest", "llava-llama3:latest"],
         help="Vision models to run sequentially for each figure.",
     )
     parser.add_argument(
@@ -589,6 +589,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also checkpoint model-specific SQLite indexes after each paper completes.",
     )
+    parser.add_argument(
+        "--pull-missing-models",
+        action="store_true",
+        help="Check Ollama for required models and pull any missing ones before starting.",
+    )
     return parser.parse_args()
 
 
@@ -604,11 +609,12 @@ def main() -> int:
         print(f"Input directory does not exist: {input_dir}", file=sys.stderr)
         return 1
 
-    required_models = list(models)
-    if args.write_index:
-        required_models.append(args.embed_model)
-    print(f"[info] checking Ollama models at {args.ollama_url}")
-    ensure_models_available(required_models, args.ollama_url)
+    if args.pull_missing_models:
+        required_models = list(models)
+        if args.write_index:
+            required_models.append(args.embed_model)
+        print(f"[info] checking Ollama models at {args.ollama_url}")
+        ensure_models_available(required_models, args.ollama_url)
 
     print(f"[info] discovering figures under {input_dir}")
     all_cases = discover_cases(input_dir)
