@@ -19,6 +19,7 @@ import re
 import sqlite3
 import statistics
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -342,6 +343,48 @@ class StatusPanel:
     def __init__(self) -> None:
         self.enabled = sys.stdout.isatty()
         self.line_count = 0
+        self.state: dict | None = None
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def _build_lines(self, state: dict) -> list[str]:
+        elapsed_s = int(max(0, time.time() - state["started_at"]))
+        hours, rem = divmod(elapsed_s, 3600)
+        minutes, seconds = divmod(rem, 60)
+        timer = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return [
+            f"[paper]   {progress_bar(state['paper_idx'], state['total_papers'])} {state['paper_id']}",
+            f"[figure]  {progress_bar(state['figure_idx'], state['total_figures'])} {state['paper_id']} {state['figure_label']}",
+            f"[inpaper] {progress_bar(state['paper_figure_idx'], state['total_paper_figures'])} {state['paper_id']}",
+            f"[timer]   {timer}",
+        ]
+
+    def _draw(self) -> None:
+        if not self.enabled:
+            return
+        with self.lock:
+            state = self.state
+        if state is None:
+            return
+        lines = self._build_lines(state)
+        if self.line_count:
+            sys.stdout.write(f"\x1b[{self.line_count}F")
+        for line in lines:
+            sys.stdout.write("\x1b[2K")
+            sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+        self.line_count = len(lines)
+
+    def _tick(self) -> None:
+        while not self.stop_event.wait(1.0):
+            self._draw()
+
+    def _ensure_thread(self) -> None:
+        if not self.enabled or self.thread is not None:
+            return
+        self.thread = threading.Thread(target=self._tick, daemon=True)
+        self.thread.start()
 
     def render(
         self,
@@ -355,29 +398,33 @@ class StatusPanel:
         figure_label: str,
         started_at: float,
     ) -> None:
-        del started_at
-        wall_clock = time.strftime("%H:%M:%S")
-        lines = [
-            f"[paper]   {progress_bar(paper_idx, total_papers)} {paper_id}",
-            f"[figure]  {progress_bar(figure_idx, total_figures)} {paper_id} {figure_label}",
-            f"[inpaper] {progress_bar(paper_figure_idx, total_paper_figures)} {paper_id}",
-            f"[clock]   {wall_clock}",
-        ]
+        state = {
+            "paper_idx": paper_idx,
+            "total_papers": total_papers,
+            "figure_idx": figure_idx,
+            "total_figures": total_figures,
+            "paper_figure_idx": paper_figure_idx,
+            "total_paper_figures": total_paper_figures,
+            "paper_id": paper_id,
+            "figure_label": figure_label,
+            "started_at": started_at,
+        }
 
         if self.enabled:
-            if self.line_count:
-                sys.stdout.write(f"\x1b[{self.line_count}F")
-            for line in lines:
-                sys.stdout.write("\x1b[2K")
-                sys.stdout.write(line + "\n")
-            sys.stdout.flush()
-            self.line_count = len(lines)
+            with self.lock:
+                self.state = state
+            self._ensure_thread()
+            self._draw()
             return
 
-        for line in lines:
+        for line in self._build_lines(state):
             print(line)
 
     def finish(self) -> None:
+        if self.enabled:
+            self.stop_event.set()
+            if self.thread is not None:
+                self.thread.join(timeout=1.5)
         if self.enabled and self.line_count:
             sys.stdout.write("\n")
             sys.stdout.flush()
