@@ -103,6 +103,42 @@ def model_response(image_path: str, model: str, ollama_url: str, timeout_s: int)
     return response.json().get("response", "").strip()
 
 
+def fetch_available_models(ollama_url: str) -> set[str]:
+    response = requests.get(f"{ollama_url}/api/tags", timeout=(5, 30))
+    response.raise_for_status()
+    models = response.json().get("models", [])
+    names = set()
+    for model in models:
+        for key in ("name", "model"):
+            value = model.get(key)
+            if value:
+                names.add(value)
+    return names
+
+
+def ensure_model_available(model: str, ollama_url: str) -> None:
+    available_models = fetch_available_models(ollama_url)
+    if model in available_models:
+        return
+
+    print(f"[ollama] pulling missing model: {model}")
+    response = requests.post(
+        f"{ollama_url}/api/pull",
+        json={"name": model, "stream": False},
+        timeout=(5, 1800),
+    )
+    response.raise_for_status()
+
+    available_models = fetch_available_models(ollama_url)
+    if model not in available_models:
+        raise RuntimeError(f"Model pull completed but '{model}' is still unavailable at {ollama_url}.")
+
+
+def ensure_models_available(models: list[str], ollama_url: str) -> None:
+    for model in models:
+        ensure_model_available(model, ollama_url)
+
+
 def store_paper_with_cached_vision(
     con: sqlite3.Connection,
     paper: pmc_indexer.PaperData,
@@ -500,7 +536,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        default=["gemma3:4b", "moondream2", "qwen2.5vl:7b", "llava-phi3", "llava-llama3"],
+        default=["gemma3:4b", "moondream2", "qwen2.5vl:7b", "llava-phi3", "llava-llama3:latest"],
         help="Vision models to run sequentially for each figure.",
     )
     parser.add_argument(
@@ -567,6 +603,12 @@ def main() -> int:
     if not input_dir.exists():
         print(f"Input directory does not exist: {input_dir}", file=sys.stderr)
         return 1
+
+    required_models = list(models)
+    if args.write_index:
+        required_models.append(args.embed_model)
+    print(f"[info] checking Ollama models at {args.ollama_url}")
+    ensure_models_available(required_models, args.ollama_url)
 
     print(f"[info] discovering figures under {input_dir}")
     all_cases = discover_cases(input_dir)
